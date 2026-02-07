@@ -30,9 +30,19 @@ Para verificar um e-mail, faça uma requisição `GET` para o endpoint `/verify`
 **Endpoint:**
 `GET http://localhost:3000/verify?email={email_a_verificar}`
 
-**Exemplo (cURL):**
+**Exemplo (cURL no CMD ou Bash):**
 ```bash
 curl "http://localhost:3000/verify?email=teste@mailinator.com"
+```
+
+**Exemplo (PowerShell):**
+No PowerShell, use `Invoke-RestMethod` ou `curl.exe`:
+```powershell
+# Opção 1 (Recomendada):
+Invoke-RestMethod -Uri "http://localhost:3000/verify?email=teste@mailinator.com"
+
+# Opção 2 (cURL nativo):
+curl.exe "http://localhost:3000/verify?email=teste@mailinator.com"
 ```
 
 **Exemplo (JavaScript/Node):**
@@ -82,12 +92,49 @@ A API retorna um objeto JSON com os detalhes da verificação.
 
 ## 📊 Tabela de Pontuação (Score)
 
-| Score | Significado | Ação Recomendada |
-| :--- | :--- | :--- |
-| **100** | **E-mail Confiável** | ✅ Permitir cadastro. O domínio não está em listas negras e possui registros MX válidos. |
-| **0** | **E-mail Inválido ou Temporário** | ❌ Bloquear cadastro. O domínio é conhecido por ser temporário, ou não possui registros MX, ou a sintaxe é inválida. |
+## 📊 Tabela de Pontuação (Deep Check)
 
-### Detalhamento dos Critérios de Score 0:
-- **Domain is in disposable email blocklist**: O domínio foi encontrado em uma das listas de e-mails descartáveis.
-- **Domain has no valid MX records**: O domínio existe, mas não está configurado para receber e-mails (provavelmente fake).
-- **Invalid email syntax**: O formato do e-mail está incorreto (ex: falta `@`).
+A API utiliza uma abordagem em **duas fases** para maximizar a segurança.
+
+### Fase 1: O "Paredão" (Bloqueio Imediato)
+Se o domínio estiver em uma das nossas listas negras (ex: `temp-mail.org`, `mailinator.com`), o e-mail recebe **Score 0** imediatamente e é bloqueado. Não há processamento adicional.
+
+### Fase 2: Análise Profunda (0 a 100 pontos)
+Se o domínio for desconhecido ou legítimo, aplicamos os critérios abaixo:
+
+| Critério | Pontos | Descrição |
+| :--- | :--- | :--- |
+| **Não Descartável** | **+30** | O domínio sobreviveu à Fase 1. |
+| **Caixa de Entrada (SMTP)** | **+30** | Conectamos ao servidor (Porta 25) e confirmamos que usuário existe. |
+| **Registros MX** | **+20** | O domínio tem servidores de e-mail configurados. |
+| **Sintaxe Válida** | **+10** | Formato básico correto. |
+| **E-mail Pessoal** | **+5** | Não é um e-mail genérico como `admin@` ou `suporte@`. |
+| **Legibilidade** | **+5** | O usuário não parece ser aleatório (ex: `a1b2c3d4`). |
+
+---
+
+### Classificação Final:
+
+| Score | Status | Ação |
+| :--- | :--- | :--- |
+| **100** | **Perfeito** | ✅ E-mail 100% validado e existente. |
+| **70 - 95** | **Seguro** | ✅ Provavelmente um e-mail corporativo ou com bloqueio de SMTP. Aceitável. |
+| **40 - 65** | **Suspeito** | ⚠️ Domínio existe, mas o usuário não foi encontrado ou o e-mail é genérico/estranho. |
+| **< 40** | **Lixo** | ❌ Bloquear. Domínio sem MX ou erro grave. |
+
+### Exemplo de Resposta (Deep Check):
+```json
+{
+  "email": "dev@google.com",
+  "score": 100,
+  "reasons": [
+    "Valid Syntax (+10)",
+    "Domain Trusted (Not in Blocklist) (+30)",
+    "MX Records Valid (+20)",
+    "Personal Address (Not Role-Based) (+5)",
+    "User looks legitimate (Not Gibberish) (+5)",
+    "SMTP Handshake: Mailbox Exists (+30)"
+  ]
+}
+```
+
