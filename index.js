@@ -10,14 +10,12 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Load lists on startup
 updateLists().then(() => {
     console.log('Disposable email lists loaded.');
 }).catch(err => {
     console.error('Failed to load lists on startup:', err);
 });
 
-// Periodic update (every 24 hours)
 setInterval(() => {
     updateLists();
 }, 24 * 60 * 60 * 1000);

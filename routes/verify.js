@@ -3,7 +3,6 @@ const router = express.Router();
 const { isDisposable } = require('../utils/fetchLists');
 const dns = require('dns').promises;
 
-// Helper to check MX records
 async function checkMxRecords(domain) {
     try {
         const records = await dns.resolveMx(domain);
@@ -20,7 +19,6 @@ router.get('/', async (req, res) => {
         return res.status(400).json({ error: 'Email parameter is required' });
     }
 
-    // Basic syntax validation
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
         return res.json({
@@ -35,13 +33,10 @@ router.get('/', async (req, res) => {
 
     const domain = email.split('@')[1];
 
-    // Check if disposable
     const disposable = isDisposable(domain);
 
-    // Check MX records
     const hasMx = await checkMxRecords(domain);
 
-    // Scoring Logic
     let score = 0;
     let reasons = [];
 
