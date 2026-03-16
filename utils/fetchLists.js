@@ -28,22 +28,58 @@ async function fetchList(url) {
 async function updateLists() {
     console.log('Updating disposable email lists...');
     const allDomains = new Set();
+    const allWildcards = new Set();
 
     // 1. Add Remote Lists
     for (const url of LIST_URLS) {
         const domains = await fetchList(url);
-        domains.forEach(domain => allDomains.add(domain.toLowerCase()));
+        for (const raw of domains) {
+            const domain = raw.toLowerCase();
+            // Detect wildcard entries: *.example.com or .example.com
+            if (domain.startsWith('*.')) {
+                allWildcards.add(domain.slice(2)); // store "example.com"
+            } else if (domain.startsWith('.')) {
+                allWildcards.add(domain.slice(1)); // store "example.com"
+            } else {
+                allDomains.add(domain);
+            }
+        }
     }
 
     // 2. Add Custom Blocklist (Manual Overrides)
-    customBlocklist.forEach(domain => allDomains.add(domain.toLowerCase()));
+    for (const raw of customBlocklist) {
+        const domain = raw.toLowerCase();
+        if (domain.startsWith('*.')) {
+            allWildcards.add(domain.slice(2));
+        } else if (domain.startsWith('.')) {
+            allWildcards.add(domain.slice(1));
+        } else {
+            allDomains.add(domain);
+        }
+    }
 
     disposableDomains = allDomains;
-    console.log(`Updated lists. Total disposable domains: ${disposableDomains.size} (including ${customBlocklist.length} custom)`);
+    wildcards = allWildcards;
+    console.log(`Updated lists. Total disposable domains: ${disposableDomains.size} (including ${customBlocklist.length} custom), Wildcards: ${wildcards.size}`);
+}
+
+/**
+ * Checks if a domain matches any wildcard pattern.
+ * e.g. if wildcards has "027168.com", then "sub.027168.com" matches.
+ */
+function isWildcardBlocked(domain) {
+    const lower = domain.toLowerCase();
+    for (const wc of wildcards) {
+        if (lower === wc || lower.endsWith('.' + wc)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 function isDisposable(domain) {
-    return disposableDomains.has(domain.toLowerCase());
+    const lower = domain.toLowerCase();
+    return disposableDomains.has(lower) || isWildcardBlocked(lower);
 }
 
-module.exports = { updateLists, isDisposable };
+module.exports = { updateLists, isDisposable, isWildcardBlocked };

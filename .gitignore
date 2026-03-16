@@ -72,3 +72,6 @@ typings/
 public
 
 package-lock.json
+
+# Verification logs
+logs/

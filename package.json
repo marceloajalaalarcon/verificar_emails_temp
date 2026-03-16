@@ -1,13 +1,13 @@
 {
   "name": "verificar_emails_temp",
-  "version": "1.0.0",
-  "description": "",
+  "version": "2.0.0",
+  "description": "Email Verification API — Kickbox-level quality",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "test": "node test_simple.js"
   },
-  "keywords": [],
+  "keywords": ["email", "verification", "disposable", "smtp", "api"],
   "author": "DuckDev (duckdev.com.br)",
   "license": "MIT",
   "type": "commonjs",
@@ -15,6 +15,8 @@
     "axios": "^1.13.4",
     "cors": "^2.8.6",
     "dotenv": "^17.2.4",
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "express-rate-limit": "^7.5.0",
+    "whois-json": "^2.0.4"
   }
 }
