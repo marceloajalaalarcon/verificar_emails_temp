@@ -2,5 +2,6 @@
 module.exports = [
     'cimario.com',
     'codgal.com',
+    'duoley.com',
     // Add other new domains here
 ];

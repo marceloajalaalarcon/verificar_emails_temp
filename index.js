@@ -8,6 +8,7 @@ const bulkRoutes = require('./routes/bulk');
 const { updateLists } = require('./utils/fetchLists');
 const { getMetrics } = require('./utils/metrics');
 const { stats: cacheStats } = require('./utils/cache');
+const { intelCacheStats } = require('./utils/domainIntel');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -65,7 +66,8 @@ app.use('/verify/bulk', apiKeyAuth, bulkRoutes);
 app.get('/metrics', apiKeyAuth, (req, res) => {
     res.json({
         ...getMetrics(),
-        cache: cacheStats()
+        cache: cacheStats(),
+        domainIntelCache: intelCacheStats()
     });
 });
 
