@@ -2,10 +2,21 @@ const axios = require('axios');
 const customBlocklist = require('./custom_blocklist');
 
 const LIST_URLS = [
-    'https://raw.githubusercontent.com/disposable-email-domains/disposable-email-domains/master/disposable_email_blocklist.conf',
+    // Atualizadas frequentemente (Padrão Ouro do Github)
+    'https://raw.githubusercontent.com/disposable-email-domains/disposable-email-domains/main/disposable_email_blocklist.conf',
+    'https://disposable.github.io/disposable-email-domains/domains.txt',
+    'https://raw.githubusercontent.com/disposable/disposable-email-domains/master/domains_strict.txt',
+    'https://raw.githubusercontent.com/amieiro/disposable-email-domains/master/denyDomains.json',
+    
+    // Listas conhecidas que já usávamos
     'https://raw.githubusercontent.com/ivolo/disposable-email-domains/master/index.json',
     'https://raw.githubusercontent.com/wesbos/burner-email-providers/master/emails.txt',
-    'https://raw.githubusercontent.com/7c/fakefilter/main/txt/data.txt'
+    'https://raw.githubusercontent.com/7c/fakefilter/main/txt/data.txt',
+    
+    // Aggregators & Listas Grandes
+    'https://raw.githubusercontent.com/sajjadh47/disposable-email-domains-list/main/domains.txt',
+    'https://raw.githubusercontent.com/WebSnifferHQ/disposable-email-domains/main/disposable-email-domains.txt',
+    'https://raw.githubusercontent.com/unkn0w/disposable-email-domain-list/master/domains.txt'
 ];
 
 let disposableDomains = new Set();
