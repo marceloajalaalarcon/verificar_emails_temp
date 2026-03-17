@@ -1,13 +1,19 @@
 {
   "name": "verificar_emails_temp",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Email Verification API — Kickbox-level quality",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "test": "node test_simple.js"
   },
-  "keywords": ["email", "verification", "disposable", "smtp", "api"],
+  "keywords": [
+    "email",
+    "verification",
+    "disposable",
+    "smtp",
+    "api"
+  ],
   "author": "DuckDev (duckdev.com.br)",
   "license": "MIT",
   "type": "commonjs",

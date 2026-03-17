@@ -94,18 +94,31 @@ async function getDomainIntelligence(domain) {
         WHOIS_ENABLED ? getDomainAge(lower).catch(() => null) : Promise.resolve(null)
     ]);
 
+    // Detect suspicious keywords in domain name
+    const SUSPICIOUS_KEYWORDS = [
+        'temp', 'tmp', 'disposable', 'throwaway', 'fake',
+        'trash', 'junk', 'burner', 'guerrilla', 'hide',
+        'hiding', 'anon', 'anonymous', 'yopmail',
+        'mailinator', 'sharklasers', 'getairmail',
+        'filzmail', 'inboxbear', 'tempmail', 'tmpmail'
+    ];
+    const domainName = lower.split('.')[0];
+    const hasSuspiciousName = SUSPICIOUS_KEYWORDS.some(kw => domainName.includes(kw));
+
     // Count suspicious signals
     let suspiciousSignals = 0;
     if (!hasSPF) suspiciousSignals++;
     if (!hasDMARC) suspiciousSignals++;
     if (!hasWebsite) suspiciousSignals++;
     if (domainAgeDays !== null && domainAgeDays < 90) suspiciousSignals++;
+    if (hasSuspiciousName) suspiciousSignals++;
 
     const result = {
         hasSPF,
         hasDMARC,
         hasWebsite,
         domainAgeDays,
+        hasSuspiciousName,
         suspiciousSignals,
         isLikelyDisposable: suspiciousSignals >= 3
     };

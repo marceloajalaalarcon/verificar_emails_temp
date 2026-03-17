@@ -198,6 +198,7 @@ async function verifyEmail(email) {
             email,
             isValidSyntax: false,
             score: 0,
+            status: 'undeliverable',
             reasons: ['Invalid email syntax']
         };
         recordVerification(result);
@@ -216,6 +217,7 @@ async function verifyEmail(email) {
             isValidSyntax: true,
             isDisposable: true,
             score: 0,
+            status: 'undeliverable',
             reasons: ['Blocked by Disposable List (Phase 1)']
         };
         cache.set(email, result);
@@ -267,7 +269,9 @@ async function verifyEmail(email) {
         reasons.push('User looks random/gibberish (+0)');
     }
 
-    // SMTP Deep Check
+    // ============================
+    // CAMADA 2: SMTP CONTEXTUAL
+    // ============================
     let smtpValid = false;
     let isCatchAll = false;
 
@@ -285,84 +289,109 @@ async function verifyEmail(email) {
         isCatchAll = smtpResult.isCatchAll;
     }
 
-    // 4. PHASE 2.5: Domain Intelligence (automatic zero-day detection)
+    // Coletar Domain Intel (só para não-major providers)
     let domainIntel = null;
-    if (!isMajorProvider(domain)) {
+    const majorProvider = isMajorProvider(domain);
+
+    if (!majorProvider) {
         domainIntel = await getDomainIntelligence(domain);
-
-        if (!domainIntel.hasSPF) {
-            score -= 5;
-            reasons.push('Domain Intel: No SPF record found (-5)');
-        }
-        if (!domainIntel.hasDMARC) {
-            score -= 5;
-            reasons.push('Domain Intel: No DMARC record found (-5)');
-        }
-        if (!domainIntel.hasWebsite) {
-            score -= 5;
-            reasons.push('Domain Intel: No website (A record) found (-5)');
-        }
-        if (domainIntel.domainAgeDays !== null && domainIntel.domainAgeDays < 90) {
-            score -= 10;
-            reasons.push(`Domain Intel: Domain is only ${domainIntel.domainAgeDays} days old (-10)`);
-        }
-
-        // Nuclear: 3+ suspicious signals = almost certainly disposable
-        if (domainIntel.suspiciousSignals >= 3) {
-            score -= 15;
-            reasons.push(`CRITICAL: Domain has ${domainIntel.suspiciousSignals}/4 suspicious signals — likely disposable (-15)`);
-        }
     }
 
-    if (smtpValid) {
-        if (isCatchAll) {
-            if (!isMajorProvider(domain) && domainIntel && (!domainIntel.hasWebsite || !domainIntel.hasDMARC)) {
-                // Catch-All + Unknown Domain + Missing web/DMARC = Highly likely Temp Mail
-                score -= 80;
-                reasons.push('NUCLEAR: Domain is Catch-All + Suspicious DNS = Likely Temp Mail (-80)');
-            } else {
-                score -= 40;
-                reasons.push('CRITICAL: Domain is Catch-All (Accepts any user) (-40)');
-            }
-        } else {
+    // SMTP scoring contextual
+    if (smtpValid && !isCatchAll) {
+        if (majorProvider || (domainIntel && domainIntel.hasWebsite)) {
             score += 30;
-            reasons.push('SMTP Handshake: Mailbox Exists (+30)');
+            reasons.push('SMTP: Mailbox confirmed on established domain (+30)');
+        } else {
+            score += 15;
+            reasons.push('SMTP: Mailbox exists but domain has no web presence (+15)');
         }
+    } else if (smtpValid && isCatchAll) {
+        score += 0;
+        reasons.push('SMTP: Catch-all domain, mailbox not individually confirmed (+0)');
     } else {
-        // Penalize SMTP fail on unknown domains
-        if (isMajorProvider(domain)) {
-            reasons.push('SMTP: Blocked by provider (expected for major providers) (+0)');
-        } else if (domainIntel && domainIntel.hasSPF && domainIntel.hasDMARC) {
-            // Corporate firewall likely blocked the probe, don't penalize heavily
-            score -= 2;
-            reasons.push('SMTP: Mailbox not verified, but DNS is solid (corporate firewall?) (-2)');
+        // SMTP failed
+        if (majorProvider) {
+            score += 0;
+            reasons.push('SMTP: Blocked by provider (normal for Gmail/Outlook) (+0)');
+        } else if (domainIntel && domainIntel.hasWebsite && domainIntel.hasSPF) {
+            score += 0;
+            reasons.push('SMTP: Blocked but DNS is solid (corporate firewall?) (+0)');
         } else {
             score -= 10;
-            reasons.push('SMTP: Mailbox not verified on unknown/weak domain (-10)');
-            if (gibberish) {
-                score -= 5;
-                reasons.push('SUSPICIOUS COMBO: Gibberish user + unknown domain + SMTP fail (-5)');
-            }
+            reasons.push('SMTP: Failed on unknown/weak domain (-10)');
         }
     }
 
-    // 5. WHOIS (legacy, only if not already checked by domainIntel)
-    if (WHOIS_ENABLED && isMajorProvider(domain)) {
-        // domainIntel already handles WHOIS for non-major providers
-        // This branch only runs WHOIS for major providers (rarely useful, kept for completeness)
-        try {
-            const ageDays = await getDomainAge(domain);
-            if (ageDays !== null && ageDays < 30) {
-                score -= 10;
-                reasons.push(`WHOIS: Domain is ${ageDays} days old (< 30 days) (-10)`);
-            }
-        } catch (e) {
-            // Ignore
+    // ============================
+    // CAMADA 3: DOMAIN INTEL COMBOS
+    // ============================
+    if (domainIntel && !majorProvider) {
+        // --- Bônus ---
+        if (domainIntel.hasWebsite && domainIntel.hasSPF) {
+            score += 10;
+            reasons.push('Established domain: Website + SPF (+10)');
         }
+        if (domainIntel.hasWebsite && domainIntel.hasSPF && domainIntel.hasDMARC) {
+            score += 5;
+            reasons.push('Full email infrastructure: SPF + DMARC + Website (+5)');
+        }
+
+        // --- Penalidades por combo ---
+        if (!domainIntel.hasWebsite && gibberish) {
+            score -= 10;
+            reasons.push('No website + generated username (-10)');
+        }
+        if (isCatchAll && !domainIntel.hasWebsite) {
+            score -= 20;
+            reasons.push('Catch-all + no website = likely disposable (-20)');
+        }
+        if (isCatchAll && gibberish) {
+            score -= 15;
+            reasons.push('Catch-all + generated username (-15)');
+        }
+        if (domainIntel.hasSuspiciousName) {
+            score -= 15;
+            reasons.push('Domain name contains disposable email keywords (-15)');
+        }
+        if (!domainIntel.hasWebsite && !domainIntel.hasSPF && !domainIntel.hasDMARC) {
+            score -= 10;
+            reasons.push('No email infrastructure at all (-10)');
+        }
+
+        // --- NUCLEAR CLAMP ---
+        let suspiciousCount = 0;
+        if (!domainIntel.hasWebsite)       suspiciousCount++;
+        if (isCatchAll)                    suspiciousCount++;
+        if (gibberish)                     suspiciousCount++;
+        if (domainIntel.hasSuspiciousName) suspiciousCount++;
+        if (!domainIntel.hasSPF)           suspiciousCount++;
+        if (!domainIntel.hasDMARC)         suspiciousCount++;
+        if (domainIntel.domainAgeDays !== null && domainIntel.domainAgeDays < 90) {
+            suspiciousCount++;
+        }
+
+        if (suspiciousCount >= 4) {
+            score = Math.min(score, 5);
+            reasons.push(`NUCLEAR: ${suspiciousCount}/7 suspicious signals (clamped to 5)`);
+        } else if (suspiciousCount >= 3) {
+            score = Math.min(score, 15);
+            reasons.push(`CRITICAL: ${suspiciousCount}/7 suspicious signals (clamped to 15)`);
+        }
+    }
+
+    // SMTP fail + gibberish combo (independente de domainIntel)
+    if (!smtpValid && !majorProvider && gibberish) {
+        score -= 5;
+        reasons.push('Gibberish user + SMTP fail (-5)');
     }
 
     // Final Safety Clamp
     if (score < 0) score = 0;
+
+    const status = score >= 70 ? 'deliverable'
+                 : score >= 40 ? 'risky'
+                 : 'undeliverable';
 
     const result = {
         email,
@@ -376,6 +405,7 @@ async function verifyEmail(email) {
         isCatchAll,
         domainIntel: domainIntel || null,
         score,
+        status,
         reasons
     };
 
