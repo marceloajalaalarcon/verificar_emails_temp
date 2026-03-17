@@ -5,7 +5,8 @@ const rateLimit = require('express-rate-limit');
 const apiKeyAuth = require('./middleware/auth');
 const verifyRoutes = require('./routes/verify');
 const bulkRoutes = require('./routes/bulk');
-const { updateLists } = require('./utils/fetchLists');
+const { updateLists, addDomains } = require('./utils/fetchLists');
+const { startScraper } = require('./utils/tempMailScraper');
 const { getMetrics } = require('./utils/metrics');
 const { stats: cacheStats } = require('./utils/cache');
 const { intelCacheStats } = require('./utils/domainIntel');
@@ -30,9 +31,11 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// --- Load disposable email lists ---
+// --- Load disposable email lists, then start scraper ---
 updateLists().then(() => {
     console.log('Disposable email lists loaded.');
+    // Start auto-discovery of temp mail domains AFTER lists are loaded
+    startScraper(addDomains);
 }).catch(err => {
     console.error('Failed to load lists on startup:', err);
 });
@@ -49,7 +52,7 @@ app.get('/', (req, res) => {
     res.json({
         status: 'running',
         service: 'Email Verification API',
-        version: '2.0.0',
+        version: '2.1.0',
         endpoints: {
             verify: 'GET /verify?email=user@example.com',
             bulk: 'POST /verify/bulk { "emails": [...] }',

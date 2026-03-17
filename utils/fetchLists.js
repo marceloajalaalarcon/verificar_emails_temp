@@ -83,4 +83,24 @@ function isDisposable(domain) {
     return disposableDomains.has(lower) || isWildcardBlocked(lower);
 }
 
-module.exports = { updateLists, isDisposable, isWildcardBlocked };
+/**
+ * Inject additional domains into the live disposable set.
+ * Used by tempMailScraper to add discovered domains at runtime.
+ * @param {Set<string>} domains
+ */
+function addDomains(domains) {
+    let added = 0;
+    for (const domain of domains) {
+        const lower = domain.toLowerCase();
+        if (!disposableDomains.has(lower)) {
+            disposableDomains.add(lower);
+            added++;
+        }
+    }
+    if (added > 0) {
+        console.log(`[fetchLists] Injected ${added} scraped domains into live blocklist (total: ${disposableDomains.size})`);
+    }
+}
+
+module.exports = { updateLists, isDisposable, isWildcardBlocked, addDomains };
+

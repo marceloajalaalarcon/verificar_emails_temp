@@ -96,12 +96,15 @@ function isGibberish(user) {
     if (length > 6 && (digits / length) >= 0.4) return true;
 
     // Pattern 2: Shannon entropy on alpha-only portion
+    // Real names usually have lower entropy (repeated vowels/consonants like 'contato', 'maria')
+    // Random strings without repeated characters have higher entropy.
+    // Max entropy for length N is log2(N). 
     const alphaOnly = lower.replace(/[^a-z]/g, '');
-    if (alphaOnly.length >= 5) {
+    if (alphaOnly.length >= 6) {
         const entropy = shannonEntropy(alphaOnly);
-        // Random 5-6 char strings typically have entropy 2.0-2.5
-        // Real names typically have entropy > 2.5 for 5+ unique-ish chars
-        if (entropy < 2.5) return true;
+        // If string is perfectly uniform (e.g. 6 different lowercase letters = 2.58 entropy)
+        // We only flag extremely high entropy strings (e.g., 8+ random unique chars)
+        if (entropy > 3.2) return true;
     }
 
     // Pattern 3: Consonant clusters (4+ consecutive consonants)
@@ -282,28 +285,6 @@ async function verifyEmail(email) {
         isCatchAll = smtpResult.isCatchAll;
     }
 
-    if (smtpValid) {
-        if (isCatchAll) {
-            score -= 40;
-            reasons.push('CRITICAL: Domain is Catch-All (Accepts random users) (-40)');
-        } else {
-            score += 30;
-            reasons.push('SMTP Handshake: Mailbox Exists (+30)');
-        }
-    } else {
-        // Penalize SMTP fail on unknown domains
-        if (isMajorProvider(domain)) {
-            reasons.push('SMTP: Blocked by provider (expected for major providers) (+0)');
-        } else {
-            score -= 10;
-            reasons.push('SMTP: Mailbox not verified on unknown domain (-10)');
-            if (gibberish) {
-                score -= 5;
-                reasons.push('SUSPICIOUS COMBO: Gibberish user + unknown domain + SMTP fail (-5)');
-            }
-        }
-    }
-
     // 4. PHASE 2.5: Domain Intelligence (automatic zero-day detection)
     let domainIntel = null;
     if (!isMajorProvider(domain)) {
@@ -330,6 +311,38 @@ async function verifyEmail(email) {
         if (domainIntel.suspiciousSignals >= 3) {
             score -= 15;
             reasons.push(`CRITICAL: Domain has ${domainIntel.suspiciousSignals}/4 suspicious signals — likely disposable (-15)`);
+        }
+    }
+
+    if (smtpValid) {
+        if (isCatchAll) {
+            if (!isMajorProvider(domain) && domainIntel && (!domainIntel.hasWebsite || !domainIntel.hasDMARC)) {
+                // Catch-All + Unknown Domain + Missing web/DMARC = Highly likely Temp Mail
+                score -= 80;
+                reasons.push('NUCLEAR: Domain is Catch-All + Suspicious DNS = Likely Temp Mail (-80)');
+            } else {
+                score -= 40;
+                reasons.push('CRITICAL: Domain is Catch-All (Accepts any user) (-40)');
+            }
+        } else {
+            score += 30;
+            reasons.push('SMTP Handshake: Mailbox Exists (+30)');
+        }
+    } else {
+        // Penalize SMTP fail on unknown domains
+        if (isMajorProvider(domain)) {
+            reasons.push('SMTP: Blocked by provider (expected for major providers) (+0)');
+        } else if (domainIntel && domainIntel.hasSPF && domainIntel.hasDMARC) {
+            // Corporate firewall likely blocked the probe, don't penalize heavily
+            score -= 2;
+            reasons.push('SMTP: Mailbox not verified, but DNS is solid (corporate firewall?) (-2)');
+        } else {
+            score -= 10;
+            reasons.push('SMTP: Mailbox not verified on unknown/weak domain (-10)');
+            if (gibberish) {
+                score -= 5;
+                reasons.push('SUSPICIOUS COMBO: Gibberish user + unknown domain + SMTP fail (-5)');
+            }
         }
     }
 

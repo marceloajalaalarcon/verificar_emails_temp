@@ -75,3 +75,6 @@ package-lock.json
 
 # Verification logs
 logs/
+
+# Scraped discovered domains (auto-generated)
+data/
