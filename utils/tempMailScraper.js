@@ -53,7 +53,9 @@ async function fetchFromAPI(name, url, parser) {
         }
         return domains;
     } catch (err) {
-        console.error(`[Scraper] ${name} failed: ${err.message}`);
+        // Soft warning. It's common for these APIs to go down or block IPs (403, 404, etc)
+        const status = err.response ? err.response.status : 'Network Error';
+        console.log(`[Scraper] ⚠️ ${name} indisponível no momento (Status: ${status}). Ignorando...`);
         return [];
     }
 }

@@ -1,5 +1,6 @@
 module.exports = [
     'cimario.com',
     'codgal.com',
-    // Add other new domains here
+    // temp-mail.org domains (known rotating domains)
+    // Add other new domains here as they appear
 ];

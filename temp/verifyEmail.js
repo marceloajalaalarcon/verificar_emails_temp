@@ -1,15 +1,12 @@
 /**
- * Core Email Verification Logic v3.1
+ * Core Email Verification Logic v2.1
  *
- * Changes from v2.1:
- *  - Domain Intel now uses effectiveHas* (with parent domain fallback)
- *  - SMTP contextual scoring uses effective signals
- *  - Catch-all on domain sem website: hard penalty
- *  - WHOIS privacy added as nuclear signal
- *  - SMTP valid + no website + gibberish = clamped to 30
- *  - Corporate domains (Website+SPF) get proper bônus even when SMTP fails
- *  - Nuclear clamp: 4+ signals → max 5, 3+ signals → max 15
- *  - New signal: MX-only domain (has MX, no website, no SPF, no DMARC)
+ * Changes from v2.0:
+ *  - Improved isGibberish() with Shannon entropy + consonant cluster detection
+ *  - MAJOR_PROVIDERS set: Gmail/Outlook/etc. not penalized for SMTP fail
+ *  - SMTP fail penalty for unknown domains (-10, combo -5)
+ *  - Domain Intelligence: automatic zero-day detection via SPF/DMARC/Website/Age
+ *  - Nuclear penalty when 3+ suspicious signals detected
  */
 
 const dns = require('dns').promises;
@@ -60,6 +57,11 @@ function isMajorProvider(domain) {
 
 // --- Improved Gibberish Detection ---
 
+/**
+ * Shannon entropy — measures randomness of a string.
+ * Real names: higher per-character variety in predictable patterns.
+ * Generated strings: uniform distribution → specific entropy range.
+ */
 function shannonEntropy(str) {
     if (str.length === 0) return 0;
     const freq = {};
@@ -75,6 +77,10 @@ function shannonEntropy(str) {
     return entropy;
 }
 
+/**
+ * Detects clusters of 4+ consecutive consonants.
+ * Common in machine-generated strings, rare in real names.
+ */
 function hasConsonantCluster(str, minCluster = 4) {
     const parts = str.toLowerCase().replace(/[aeiou]/g, ' ').split(' ');
     return parts.some(c => c.length >= minCluster);
@@ -85,14 +91,20 @@ function isGibberish(user) {
     const digits = lower.replace(/[^0-9]/g, '').length;
     const length = lower.length;
 
+    // Pattern 1: High digit ratio (>= 40%) for users > 6 chars
+    // Fixes: jimaci8303 → 4/10 = 0.4 → now detected (was > 0.4, now >= 0.4)
     if (length > 6 && (digits / length) >= 0.4) return true;
 
+    // Pattern 2: Shannon entropy on alpha-only portion
     const alphaOnly = lower.replace(/[^a-z]/g, '');
-    if (alphaOnly.length >= 6) {
+    if (alphaOnly.length >= 5) {
         const entropy = shannonEntropy(alphaOnly);
-        if (entropy > 3.2) return true;
+        // Random 5-6 char strings typically have entropy 2.0-2.5
+        // Real names typically have entropy > 2.5 for 5+ unique-ish chars
+        if (entropy < 2.5) return true;
     }
 
+    // Pattern 3: Consonant clusters (4+ consecutive consonants)
     if (hasConsonantCluster(lower.replace(/[^a-z]/g, ''))) return true;
 
     return false;
@@ -183,7 +195,6 @@ async function verifyEmail(email) {
             email,
             isValidSyntax: false,
             score: 0,
-            status: 'undeliverable',
             reasons: ['Invalid email syntax']
         };
         recordVerification(result);
@@ -202,7 +213,6 @@ async function verifyEmail(email) {
             isValidSyntax: true,
             isDisposable: true,
             score: 0,
-            status: 'undeliverable',
             reasons: ['Blocked by Disposable List (Phase 1)']
         };
         cache.set(email, result);
@@ -254,9 +264,7 @@ async function verifyEmail(email) {
         reasons.push('User looks random/gibberish (+0)');
     }
 
-    // ============================
-    // CAMADA 2: SMTP CONTEXTUAL
-    // ============================
+    // SMTP Deep Check
     let smtpValid = false;
     let isCatchAll = false;
 
@@ -274,156 +282,74 @@ async function verifyEmail(email) {
         isCatchAll = smtpResult.isCatchAll;
     }
 
-    // ============================
-    // CAMADA 2.5: DOMAIN INTEL
-    // ============================
-    let domainIntel = null;
-    const majorProvider = isMajorProvider(domain);
-
-    if (!majorProvider) {
-        domainIntel = await getDomainIntelligence(domain);
-    }
-
-    // Use EFFECTIVE signals (with parent domain fallback)
-    const effWebsite = majorProvider || (domainIntel?.effectiveHasWebsite ?? false);
-    const effSPF     = majorProvider || (domainIntel?.effectiveHasSPF ?? false);
-    const effDMARC   = majorProvider || (domainIntel?.effectiveHasDMARC ?? false);
-
-    // ============================
-    // CAMADA 3: SMTP SCORING (CONTEXTUAL)
-    // ============================
-    if (smtpValid && !isCatchAll) {
-        if (majorProvider || effWebsite) {
+    if (smtpValid) {
+        if (isCatchAll) {
+            score -= 40;
+            reasons.push('CRITICAL: Domain is Catch-All (Accepts random users) (-40)');
+        } else {
             score += 30;
-            reasons.push('SMTP: Mailbox confirmed on established domain (+30)');
-        } else {
-            // Domain has NO website, even with parent fallback
-            // SMTP valid but untrustworthy domain = reduced bonus
-            score += 10;
-            reasons.push('SMTP: Mailbox exists but domain has NO web presence (+10)');
+            reasons.push('SMTP Handshake: Mailbox Exists (+30)');
         }
-    } else if (smtpValid && isCatchAll) {
-        // Catch-all: zero bonus, will be penalized in combos below
-        score += 0;
-        reasons.push('SMTP: Catch-all domain, mailbox not individually confirmed (+0)');
     } else {
-        // SMTP failed
-        if (majorProvider) {
-            score += 0;
-            reasons.push('SMTP: Blocked by provider (normal for Gmail/Outlook) (+0)');
-        } else if (effWebsite && effSPF) {
-            // Corporate domain with proper infrastructure but SMTP blocked
-            score += 0;
-            reasons.push('SMTP: Blocked but DNS is solid (corporate firewall?) (+0)');
+        // NEW: Penalize SMTP fail on unknown domains
+        if (isMajorProvider(domain)) {
+            reasons.push('SMTP: Blocked by provider (expected for major providers) (+0)');
         } else {
             score -= 10;
-            reasons.push('SMTP: Failed on unknown/weak domain (-10)');
+            reasons.push('SMTP: Mailbox not verified on unknown domain (-10)');
+            if (gibberish) {
+                score -= 5;
+                reasons.push('SUSPICIOUS COMBO: Gibberish user + unknown domain + SMTP fail (-5)');
+            }
         }
     }
 
-    // ============================
-    // CAMADA 4: DOMAIN INTEL COMBOS
-    // ============================
-    if (domainIntel && !majorProvider) {
+    // 4. PHASE 2.5: Domain Intelligence (automatic zero-day detection)
+    let domainIntel = null;
+    if (!isMajorProvider(domain)) {
+        domainIntel = await getDomainIntelligence(domain);
 
-        // --- Bônus para domínios estabelecidos ---
-        if (effWebsite && effSPF) {
-            score += 10;
-            reasons.push('Established domain: Website + SPF (+10)');
+        if (!domainIntel.hasSPF) {
+            score -= 5;
+            reasons.push('Domain Intel: No SPF record found (-5)');
         }
-        if (effWebsite && effSPF && effDMARC) {
-            score += 5;
-            reasons.push('Full email infrastructure: SPF + DMARC + Website (+5)');
+        if (!domainIntel.hasDMARC) {
+            score -= 5;
+            reasons.push('Domain Intel: No DMARC record found (-5)');
         }
-
-        // --- Parent domain fallback info ---
-        if (domainIntel.usedParentFallback) {
-            reasons.push(`Parent domain fallback: ${domainIntel.parentDomain} provided signals`);
+        if (!domainIntel.hasWebsite) {
+            score -= 5;
+            reasons.push('Domain Intel: No website (A record) found (-5)');
         }
-
-        // --- Penalidades por combo ---
-        if (!effWebsite && gibberish) {
-            score -= 10;
-            reasons.push('No website + generated username (-10)');
-        }
-
-        if (isCatchAll && !effWebsite) {
-            score -= 25;
-            reasons.push('Catch-all + no website = likely disposable (-25)');
-        }
-
-        if (isCatchAll && gibberish) {
-            score -= 15;
-            reasons.push('Catch-all + generated username (-15)');
-        }
-
-        if (domainIntel.hasSuspiciousName) {
-            score -= 15;
-            reasons.push('Domain name contains disposable email keywords (-15)');
-        }
-
-        if (!effWebsite && !effSPF && !effDMARC) {
-            score -= 10;
-            reasons.push('No email infrastructure at all (-10)');
-        }
-
-        // NEW: SMTP valid on domain with no website = suspicious
-        // (temp mail services configure MX+SPF but no website)
-        if (smtpValid && !effWebsite && !isCatchAll) {
-            score -= 10;
-            reasons.push('SMTP valid on domain without website (-10)');
-        }
-
-        // NEW: WHOIS privacy on domain without website = suspicious
-        if (domainIntel.hasWhoisPrivacy && !effWebsite) {
-            score -= 10;
-            reasons.push('WHOIS privacy + no website (-10)');
-        }
-
-        // ============================
-        // NUCLEAR CLAMP
-        // ============================
-        let suspiciousCount = 0;
-        if (!effWebsite)                    suspiciousCount++;
-        if (isCatchAll)                     suspiciousCount++;
-        if (gibberish)                      suspiciousCount++;
-        if (domainIntel.hasSuspiciousName)  suspiciousCount++;
-        if (!effSPF)                        suspiciousCount++;
-        if (!effDMARC)                      suspiciousCount++;
-        if (domainIntel.hasWhoisPrivacy)    suspiciousCount++;
         if (domainIntel.domainAgeDays !== null && domainIntel.domainAgeDays < 90) {
-            suspiciousCount++;
-        }
-        // NEW: SMTP valid + no website counts as signal
-        // (temp mails have working SMTP but no website)
-        if (smtpValid && !effWebsite) {
-            suspiciousCount++;
+            score -= 10;
+            reasons.push(`Domain Intel: Domain is only ${domainIntel.domainAgeDays} days old (-10)`);
         }
 
-        if (suspiciousCount >= 5) {
-            score = Math.min(score, 5);
-            reasons.push(`NUCLEAR: ${suspiciousCount}/9 suspicious signals (clamped to 5)`);
-        } else if (suspiciousCount >= 4) {
-            score = Math.min(score, 10);
-            reasons.push(`CRITICAL: ${suspiciousCount}/9 suspicious signals (clamped to 10)`);
-        } else if (suspiciousCount >= 3) {
-            score = Math.min(score, 20);
-            reasons.push(`WARNING: ${suspiciousCount}/9 suspicious signals (clamped to 20)`);
+        // Nuclear: 3+ suspicious signals = almost certainly disposable
+        if (domainIntel.suspiciousSignals >= 3) {
+            score -= 15;
+            reasons.push(`CRITICAL: Domain has ${domainIntel.suspiciousSignals}/4 suspicious signals — likely disposable (-15)`);
         }
     }
 
-    // SMTP fail + gibberish combo (independente de domainIntel)
-    if (!smtpValid && !majorProvider && gibberish) {
-        score -= 5;
-        reasons.push('Gibberish user + SMTP fail (-5)');
+    // 5. WHOIS (legacy, only if not already checked by domainIntel)
+    if (WHOIS_ENABLED && isMajorProvider(domain)) {
+        // domainIntel already handles WHOIS for non-major providers
+        // This branch only runs WHOIS for major providers (rarely useful, kept for completeness)
+        try {
+            const ageDays = await getDomainAge(domain);
+            if (ageDays !== null && ageDays < 30) {
+                score -= 10;
+                reasons.push(`WHOIS: Domain is ${ageDays} days old (< 30 days) (-10)`);
+            }
+        } catch (e) {
+            // Ignore
+        }
     }
 
     // Final Safety Clamp
     if (score < 0) score = 0;
-
-    const status = score >= 70 ? 'deliverable'
-                 : score >= 40 ? 'risky'
-                 : 'undeliverable';
 
     const result = {
         email,
@@ -437,7 +363,6 @@ async function verifyEmail(email) {
         isCatchAll,
         domainIntel: domainIntel || null,
         score,
-        status,
         reasons
     };
 

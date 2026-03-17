@@ -1,18 +1,16 @@
 /**
- * Domain Intelligence Module
- * Automatically detects suspicious/disposable domains by checking DNS signals.
+ * Domain Intelligence Module v3.1
  *
- * Checks performed:
- *  - SPF record (v=spf1...)
- *  - DMARC record (_dmarc.domain)
- *  - Website existence (A record)
- *  - Domain age (via WHOIS, if enabled)
- *
- * This eliminates dependency on blocklists for zero-day disposable domains.
+ * Changes from v2.1:
+ *  - Parent domain fallback for subdomains (fixes edu.br/gov.br)
+ *  - Expanded suspicious keywords list
+ *  - Keywords checked across ALL domain levels (not just first segment)
+ *  - WHOIS privacy detection as suspicious signal
+ *  - MX-only domain detection (has MX but nothing else)
  */
 
 const dns = require('dns').promises;
-const { getDomainAge, WHOIS_ENABLED } = require('./whois');
+const { getDomainAge, getWhoisPrivacy, WHOIS_ENABLED } = require('./whois');
 
 // Cache domain intel results (avoid repeated DNS lookups)
 const intelCache = new Map();
@@ -20,12 +18,10 @@ const INTEL_CACHE_TTL = parseInt(process.env.CACHE_TTL_MS) || 3600000;
 
 /**
  * Check if domain has an SPF record.
- * Legitimate domains configure SPF to authorize mail servers.
  */
 async function checkSPF(domain) {
     try {
         const records = await dns.resolveTxt(domain);
-        // records is an array of arrays of strings
         for (const record of records) {
             const txt = record.join('');
             if (txt.toLowerCase().startsWith('v=spf1')) {
@@ -40,7 +36,6 @@ async function checkSPF(domain) {
 
 /**
  * Check if domain has a DMARC record.
- * Legitimate domains configure DMARC for email authentication.
  */
 async function checkDMARC(domain) {
     try {
@@ -59,7 +54,6 @@ async function checkDMARC(domain) {
 
 /**
  * Check if domain has an A record (website).
- * Most disposable email domains have NO website.
  */
 async function checkWebsite(domain) {
     try {
@@ -71,11 +65,101 @@ async function checkWebsite(domain) {
 }
 
 /**
+ * Extract parent domain from a subdomain.
+ * e.g. "academico.ufgd.edu.br" → "ufgd.edu.br"
+ * e.g. "mail.google.com" → "google.com"
+ *
+ * Returns null if already a root domain.
+ */
+function getParentDomain(domain) {
+    const parts = domain.split('.');
+    // Known multi-part TLDs
+    const multiPartTLDs = [
+        'com.br', 'edu.br', 'gov.br', 'org.br', 'net.br',
+        'co.uk', 'org.uk', 'ac.uk',
+        'com.au', 'edu.au',
+        'co.jp', 'or.jp',
+        'com.ar', 'edu.ar',
+        'com.mx', 'edu.mx',
+        'com.co', 'edu.co',
+        'com.pe', 'edu.pe',
+        'com.cl', 'com.py', 'com.uy',
+    ];
+
+    const joined = parts.join('.');
+    for (const tld of multiPartTLDs) {
+        if (joined.endsWith('.' + tld)) {
+            // domain is something.X.tld — parent is X.tld
+            const withoutTld = joined.slice(0, -(tld.length + 1)); // remove ".com.br"
+            const subParts = withoutTld.split('.');
+            if (subParts.length > 1) {
+                // e.g. "academico.ufgd" → parent = "ufgd.edu.br"
+                return subParts.slice(1).join('.') + '.' + tld;
+            }
+            return null; // already root (e.g. "ufgd.edu.br")
+        }
+    }
+
+    // Standard TLD (e.g. .com, .org, .net)
+    if (parts.length > 2) {
+        return parts.slice(1).join('.');
+    }
+
+    return null; // already root
+}
+
+/**
+ * Detect suspicious keywords in domain name.
+ * Checks ALL segments, not just the first one.
+ * e.g. "hidingmail.com" → checks "hidingmail"
+ * e.g. "temp.mailservice.org" → checks "temp" AND "mailservice"
+ */
+const SUSPICIOUS_KEYWORDS = [
+    // Email temp / disposable
+    'temp', 'tmp', 'disposable', 'throwaway', 'fake',
+    'trash', 'junk', 'burner', 'guerrilla', 'guerilla',
+    // Hiding / anonymous
+    'hide', 'hiding', 'anon', 'anonymous', 'privacy',
+    // Known temp mail brands
+    'yopmail', 'mailinator', 'sharklasers', 'getairmail',
+    'filzmail', 'inboxbear', 'tempmail', 'tmpmail',
+    'mailnesia', 'maildrop', 'discard', 'trashmail',
+    'throwmail', 'fakeinbox', 'tempinbox', 'tempemail',
+    'minutemail', 'emailondeck', 'guerrillamail',
+    // Pattern: "Xmail" where X is suspicious
+    'duckmail', 'spammail', 'nomail', 'deadmail',
+    // Pattern: mail + random/generated service
+    'mailbox72', 'inbox47',
+];
+
+function checkSuspiciousName(domain) {
+    const lower = domain.toLowerCase();
+    // Remove TLD parts, check each segment
+    const parts = lower.split('.');
+    // Check all non-TLD segments
+    for (let i = 0; i < parts.length - 1; i++) {
+        const segment = parts[i];
+        // Skip very short segments (e.g. "co", "ac")
+        if (segment.length <= 2) continue;
+
+        for (const kw of SUSPICIOUS_KEYWORDS) {
+            if (segment.includes(kw)) {
+                return true;
+            }
+        }
+
+        // Pattern: segment is ONLY "mail" + something or something + "mail"
+        // e.g. "duoley" won't match, but "hidingmail" will via keywords above
+    }
+    return false;
+}
+
+/**
  * Get full domain intelligence report.
- * Runs SPF, DMARC, Website, and optionally WHOIS checks in parallel.
+ * Now with parent domain fallback for subdomains.
  *
  * @param {string} domain
- * @returns {Promise<{hasSPF: boolean, hasDMARC: boolean, hasWebsite: boolean, domainAgeDays: number|null, suspiciousSignals: number, isLikelyDisposable: boolean}>}
+ * @returns {Promise<Object>}
  */
 async function getDomainIntelligence(domain) {
     const lower = domain.toLowerCase();
@@ -87,40 +171,79 @@ async function getDomainIntelligence(domain) {
     }
 
     // Run all checks in parallel for speed
-    const [hasSPF, hasDMARC, hasWebsite, domainAgeDays] = await Promise.all([
+    const [hasSPF, hasDMARC, hasWebsite, domainAgeDays, whoisPrivacy] = await Promise.all([
         checkSPF(lower),
         checkDMARC(lower),
         checkWebsite(lower),
-        WHOIS_ENABLED ? getDomainAge(lower).catch(() => null) : Promise.resolve(null)
+        WHOIS_ENABLED ? getDomainAge(lower).catch(() => null) : Promise.resolve(null),
+        WHOIS_ENABLED ? getWhoisPrivacy(lower).catch(() => null) : Promise.resolve(null)
     ]);
 
-    // Detect suspicious keywords in domain name
-    const SUSPICIOUS_KEYWORDS = [
-        'temp', 'tmp', 'disposable', 'throwaway', 'fake',
-        'trash', 'junk', 'burner', 'guerrilla', 'hide',
-        'hiding', 'anon', 'anonymous', 'yopmail',
-        'mailinator', 'sharklasers', 'getairmail',
-        'filzmail', 'inboxbear', 'tempmail', 'tmpmail'
-    ];
-    const domainName = lower.split('.')[0];
-    const hasSuspiciousName = SUSPICIOUS_KEYWORDS.some(kw => domainName.includes(kw));
+    // --- Parent Domain Fallback ---
+    // If subdomain has no signals, check the parent domain
+    let parentIntel = null;
+    const parentDomain = getParentDomain(lower);
+
+    if (parentDomain && !hasWebsite && !hasSPF && !hasDMARC) {
+        // Subdomain has nothing — check parent
+        const [parentSPF, parentDMARC, parentWebsite] = await Promise.all([
+            checkSPF(parentDomain),
+            checkDMARC(parentDomain),
+            checkWebsite(parentDomain),
+        ]);
+
+        if (parentWebsite || parentSPF || parentDMARC) {
+            parentIntel = {
+                domain: parentDomain,
+                hasSPF: parentSPF,
+                hasDMARC: parentDMARC,
+                hasWebsite: parentWebsite,
+            };
+        }
+    }
+
+    // Suspicious name detection
+    const hasSuspiciousName = checkSuspiciousName(lower);
+
+    // WHOIS privacy: temp mail services often use privacy protection
+    // Not suspicious alone, but combined with other signals it's a strong indicator
+    const hasWhoisPrivacy = whoisPrivacy === true;
+
+    // --- Determine effective signals (with parent fallback) ---
+    const effectiveHasWebsite = hasWebsite || (parentIntel?.hasWebsite ?? false);
+    const effectiveHasSPF = hasSPF || (parentIntel?.hasSPF ?? false);
+    const effectiveHasDMARC = hasDMARC || (parentIntel?.hasDMARC ?? false);
 
     // Count suspicious signals
     let suspiciousSignals = 0;
-    if (!hasSPF) suspiciousSignals++;
-    if (!hasDMARC) suspiciousSignals++;
-    if (!hasWebsite) suspiciousSignals++;
+    if (!effectiveHasSPF)    suspiciousSignals++;
+    if (!effectiveHasDMARC)  suspiciousSignals++;
+    if (!effectiveHasWebsite) suspiciousSignals++;
     if (domainAgeDays !== null && domainAgeDays < 90) suspiciousSignals++;
-    if (hasSuspiciousName) suspiciousSignals++;
+    if (hasSuspiciousName)   suspiciousSignals++;
+    if (hasWhoisPrivacy)     suspiciousSignals++;
 
     const result = {
+        // Raw signals (direct domain only)
         hasSPF,
         hasDMARC,
         hasWebsite,
         domainAgeDays,
         hasSuspiciousName,
+        hasWhoisPrivacy,
+
+        // Effective signals (with parent fallback)
+        effectiveHasWebsite,
+        effectiveHasSPF,
+        effectiveHasDMARC,
+
+        // Parent domain info (if used)
+        parentDomain: parentIntel ? parentIntel.domain : null,
+        usedParentFallback: parentIntel !== null,
+
+        // Aggregate
         suspiciousSignals,
-        isLikelyDisposable: suspiciousSignals >= 3
+        isLikelyDisposable: suspiciousSignals >= 3,
     };
 
     // Cache the result

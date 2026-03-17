@@ -1,6 +1,7 @@
 /**
- * WHOIS Domain Age Checker
+ * WHOIS Domain Age Checker + Privacy Detection
  * Penalizes very new domains (< 30 days old).
+ * Detects WHOIS privacy protection (common in temp mail domains).
  * Disabled by default via WHOIS_ENABLED=false
  */
 
@@ -10,13 +11,21 @@ const WHOIS_ENABLED = process.env.WHOIS_ENABLED === 'true';
 const whoisCache = new Map();
 const WHOIS_CACHE_TTL = parseInt(process.env.CACHE_TTL_MS) || 3600000;
 
-async function getDomainAge(domain) {
-    if (!WHOIS_ENABLED) return null;
+// Keywords that indicate WHOIS privacy protection
+const PRIVACY_KEYWORDS = [
+    'privacy', 'redacted', 'withheld', 'protected', 'private',
+    'data protected', 'whoisguard', 'domains by proxy',
+    'contact privacy', 'identity protect', 'perfect privacy',
+    'confidential', 'not disclosed', 'gdpr',
+];
 
-    // Check WHOIS cache
+/**
+ * Internal: get raw WHOIS data (cached).
+ */
+async function getRawWhois(domain) {
     const cached = whoisCache.get(domain);
     if (cached && Date.now() - cached.timestamp < WHOIS_CACHE_TTL) {
-        return cached.ageDays;
+        return cached;
     }
 
     try {
@@ -24,28 +33,61 @@ async function getDomainAge(domain) {
         const result = await whois(domain, { timeout: 5000 });
 
         let creationDate = null;
+        let registrant = null;
+        let isPrivacy = false;
 
         if (result) {
-            // whois-json may return array or object
             const data = Array.isArray(result) ? result[0] : result;
             creationDate = data.creationDate || data.createdDate || data.registrationDate || null;
+            registrant = data.registrantOrganization || data.registrantName || data.registrant || null;
+
+            // Check for privacy protection in registrant fields
+            const fieldsToCheck = [
+                data.registrantOrganization,
+                data.registrantName,
+                data.registrant,
+                data.adminName,
+                data.adminOrganization,
+                data.techName,
+                data.techOrganization,
+            ].filter(Boolean).map(f => f.toLowerCase());
+
+            isPrivacy = fieldsToCheck.some(field =>
+                PRIVACY_KEYWORDS.some(kw => field.includes(kw))
+            );
         }
 
-        if (!creationDate) {
-            whoisCache.set(domain, { ageDays: null, timestamp: Date.now() });
-            return null;
+        let ageDays = null;
+        if (creationDate) {
+            const created = new Date(creationDate);
+            ageDays = Math.floor((Date.now() - created.getTime()) / (1000 * 60 * 60 * 24));
         }
 
-        const created = new Date(creationDate);
-        const ageDays = Math.floor((Date.now() - created.getTime()) / (1000 * 60 * 60 * 24));
-
-        whoisCache.set(domain, { ageDays, timestamp: Date.now() });
-        return ageDays;
+        const entry = { ageDays, isPrivacy, registrant, timestamp: Date.now() };
+        whoisCache.set(domain, entry);
+        return entry;
     } catch (err) {
         console.error(`[WHOIS] Error looking up ${domain}:`, err.message);
-        whoisCache.set(domain, { ageDays: null, timestamp: Date.now() });
-        return null;
+        const entry = { ageDays: null, isPrivacy: null, registrant: null, timestamp: Date.now() };
+        whoisCache.set(domain, entry);
+        return entry;
     }
 }
 
-module.exports = { getDomainAge, WHOIS_ENABLED };
+async function getDomainAge(domain) {
+    if (!WHOIS_ENABLED) return null;
+    const data = await getRawWhois(domain);
+    return data.ageDays;
+}
+
+/**
+ * Detect if domain uses WHOIS privacy protection.
+ * Returns true if privacy detected, false if not, null if WHOIS disabled or lookup failed.
+ */
+async function getWhoisPrivacy(domain) {
+    if (!WHOIS_ENABLED) return null;
+    const data = await getRawWhois(domain);
+    return data.isPrivacy;
+}
+
+module.exports = { getDomainAge, getWhoisPrivacy, WHOIS_ENABLED };
