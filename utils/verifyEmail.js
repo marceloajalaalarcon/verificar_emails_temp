@@ -286,8 +286,8 @@ async function verifyEmail(email) {
 
     // Use EFFECTIVE signals (with parent domain fallback)
     const effWebsite = majorProvider || (domainIntel?.effectiveHasWebsite ?? false);
-    const effSPF     = majorProvider || (domainIntel?.effectiveHasSPF ?? false);
-    const effDMARC   = majorProvider || (domainIntel?.effectiveHasDMARC ?? false);
+    const effSPF = majorProvider || (domainIntel?.effectiveHasSPF ?? false);
+    const effDMARC = majorProvider || (domainIntel?.effectiveHasDMARC ?? false);
 
     // ============================
     // CAMADA 3: SMTP SCORING (CONTEXTUAL)
@@ -311,6 +311,12 @@ async function verifyEmail(email) {
         if (majorProvider) {
             score += 0;
             reasons.push('SMTP: Blocked by provider (normal for Gmail/Outlook) (+0)');
+        } else if (effSPF && effDMARC) {
+            // ✅ ALTERADO: SPF+DMARC é suficiente para confiar que a falha do SMTP é apenas um firewall
+            // Domínio com autenticação de e-mail configurada corretamente = servidor de e-mail legítimo
+            // (não precisa de site — muitas pequenas empresas têm e-mail sem um site)
+            score += 0;
+            reasons.push('SMTP: Blocked but email auth is solid (SPF+DMARC) (+0)');
         } else if (effWebsite && effSPF) {
             // Corporate domain with proper infrastructure but SMTP blocked
             score += 0;
@@ -384,13 +390,13 @@ async function verifyEmail(email) {
         // NUCLEAR CLAMP
         // ============================
         let suspiciousCount = 0;
-        if (!effWebsite)                    suspiciousCount++;
-        if (isCatchAll)                     suspiciousCount++;
-        if (gibberish)                      suspiciousCount++;
-        if (domainIntel.hasSuspiciousName)  suspiciousCount++;
-        if (!effSPF)                        suspiciousCount++;
-        if (!effDMARC)                      suspiciousCount++;
-        if (domainIntel.hasWhoisPrivacy)    suspiciousCount++;
+        if (!effWebsite) suspiciousCount++;
+        if (isCatchAll) suspiciousCount++;
+        if (gibberish) suspiciousCount++;
+        if (domainIntel.hasSuspiciousName) suspiciousCount++;
+        if (!effSPF) suspiciousCount++;
+        if (!effDMARC) suspiciousCount++;
+        if (domainIntel.hasWhoisPrivacy) suspiciousCount++;
         if (domainIntel.domainAgeDays !== null && domainIntel.domainAgeDays < 90) {
             suspiciousCount++;
         }
@@ -422,8 +428,8 @@ async function verifyEmail(email) {
     if (score < 0) score = 0;
 
     const status = score >= 70 ? 'deliverable'
-                 : score >= 40 ? 'risky'
-                 : 'undeliverable';
+        : score >= 40 ? 'risky'
+            : 'undeliverable';
 
     const result = {
         email,
